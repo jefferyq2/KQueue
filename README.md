@@ -2,7 +2,7 @@
 
 Swift wrapper for BSD kqueue file system monitoring.
 
-Monitors individual files and directories. Directory monitoring reports changes to the directory itself (files added/removed), not changes to files inside. For recursive monitoring use FSEvents on macOS.
+Monitors individual files and directories. Directory monitoring reports changes to the directory itself (e.g., `.write` when files are added/removed), not changes to files within. To monitor files inside a directory, watch each file individually. For recursive monitoring use FSEvents on Apple platforms.
 
 ## How It Works
 
@@ -46,8 +46,8 @@ try queue.watch("/path/to/file")
 
 | Option | Description |
 |--------|-------------|
-| `.delete` | File deleted |
-| `.write` | Write occurred |
+| `.delete` | Deleted |
+| `.write` | Written (or directory contents changed) |
 | `.extend` | Size increased |
 | `.attrib` | Attributes changed |
 | `.link` | Link count changed |
