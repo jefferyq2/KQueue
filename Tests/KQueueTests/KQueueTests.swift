@@ -3,6 +3,7 @@
 
 import Testing
 import Foundation
+import Synchronization
 @testable import KQueue
 
 @Suite("KQueue")
@@ -191,6 +192,54 @@ struct KQueueTests {
             try file.append("data")
             try await Task.sleep(for: .milliseconds(100))
         }
+    }
+
+    // MARK: - Pause/Resume
+
+    @Test(.timeLimit(.minutes(1)))
+    func pauseResume() async throws {
+        let receivedEvents = Mutex<[KQueue.Event]>([])
+        let queue = KQueue { event in
+            receivedEvents.withLock { $0.append(event) }
+        }!
+        let file = try TempFile()
+
+        try queue.watch(file.path, for: .write)
+        #expect(!queue.isPaused)
+
+        // Wait for monitoring to start
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Write 1: should receive event
+        try file.append("1")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(receivedEvents.withLock { $0.count } == 1)
+
+        // Pause and write 2: should NOT receive event
+        queue.pause()
+        #expect(queue.isPaused)
+        try file.append("2")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(receivedEvents.withLock { $0.count } == 1)
+
+        // Resume and write 3: should receive event
+        queue.resume()
+        #expect(!queue.isPaused)
+        try file.append("3")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(receivedEvents.withLock { $0.count } == 2)
+
+        // Pause again and write 4: should NOT receive event
+        queue.pause()
+        try file.append("4")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(receivedEvents.withLock { $0.count } == 2)
+
+        // Resume again and write 5: should receive event
+        queue.resume()
+        try file.append("5")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(receivedEvents.withLock { $0.count } == 3)
     }
 
     // MARK: - Notification
