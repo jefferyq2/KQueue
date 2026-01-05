@@ -96,6 +96,7 @@ public final class KQueue: Sendable {
         var pathToFD: [String: Int32] = [:]
         var fdToPath: [Int32: String] = [:]
         var monitorTask: Task<Void, Never>?
+        var isPaused: Bool = false
     }
 
     private let kqueueFD: Int32
@@ -103,7 +104,7 @@ public final class KQueue: Sendable {
     private let eventHandler: (@Sendable (Event) -> Void)?
     private let eventsContinuation: AsyncStream<Event>.Continuation
 
-    /// Timeout for the kevent() call.
+    /// Polling interval between kevent() calls.
     public let timeout: Duration
 
     /// Events from watched paths.
@@ -114,13 +115,18 @@ public final class KQueue: Sendable {
         state.withLock { Array($0.pathToFD.keys) }
     }
 
+    /// Whether event delivery is paused.
+    public var isPaused: Bool {
+        state.withLock { $0.isPaused }
+    }
+
     // MARK: - Init
 
     /// Returns nil if kqueue creation fails.
     /// - Parameters:
-    ///   - timeout: Timeout for kevent() call. Default is 1 second.
+    ///   - timeout: Polling interval between checks. Default is 10ms.
     ///   - eventHandler: Optional callback for each event.
-    public init?(timeout: Duration = .seconds(1), eventHandler: (@Sendable (Event) -> Void)? = nil) {
+    public init?(timeout: Duration = .milliseconds(10), eventHandler: (@Sendable (Event) -> Void)? = nil) {
         let fd = kqueue()
         guard fd >= 0 else { return nil }
 
@@ -222,6 +228,16 @@ public final class KQueue: Sendable {
         task?.cancel()
     }
 
+    /// Pause event delivery. Events are discarded while paused.
+    public func pause() {
+        state.withLock { $0.isPaused = true }
+    }
+
+    /// Resume event delivery.
+    public func resume() {
+        state.withLock { $0.isPaused = false }
+    }
+
     public func isWatching(_ path: String) -> Bool {
         state.withLock { $0.pathToFD[path] != nil }
     }
@@ -260,31 +276,41 @@ public final class KQueue: Sendable {
     }
 
     private func monitorLoop() async {
-        var event = kevent()
-        let (seconds, attoseconds) = timeout.components
-        var timeoutSpec = timespec(tv_sec: Int(seconds), tv_nsec: Int(attoseconds / 1_000_000_000))
+        var events: [kevent] = Array(repeating: kevent(), count: 16)
+        var immediateTimeout = timespec(tv_sec: 0, tv_nsec: 0)
 
         while !Task.isCancelled && state.withLock({ !$0.fdToPath.isEmpty }) {
+            // Drain all pending events
+            while true {
+                let eventCount = events.withUnsafeMutableBufferPointer { buffer in
+                    kevent(kqueueFD, nil, 0, buffer.baseAddress, Int32(buffer.count), &immediateTimeout)
+                }
 
-            let eventCount = kevent(kqueueFD, nil, 0, &event, 1, &timeoutSpec)
+                if eventCount < 0 {
+                    if errno == EINTR { continue }
+                    return
+                }
 
-            if eventCount < 0 {
-                if errno == EINTR { continue }
-                break
-            }
+                if eventCount == 0 { break }
 
-            if eventCount > 0 && event.filter == Int16(EVFILT_VNODE) {
-                let fd = Int32(event.ident)
-                let fflags = event.fflags
+                let (fdToPath, isPaused) = state.withLock { ($0.fdToPath, $0.isPaused) }
 
-                let path = state.withLock { $0.fdToPath[fd] }
+                if !isPaused {
+                    for i in 0..<Int(eventCount) {
+                        let event = events[i]
+                        guard event.filter == Int16(EVFILT_VNODE) else { continue }
 
-                if let path {
-                    let evt = Event(path: path, notification: Notification(rawValue: fflags))
-                    eventHandler?(evt)
-                    eventsContinuation.yield(evt)
+                        let fd = Int32(event.ident)
+                        if let path = fdToPath[fd] {
+                            let evt = Event(path: path, notification: Notification(rawValue: event.fflags))
+                            eventHandler?(evt)
+                            eventsContinuation.yield(evt)
+                        }
+                    }
                 }
             }
+
+            try? await Task.sleep(for: timeout)
         }
     }
 }
