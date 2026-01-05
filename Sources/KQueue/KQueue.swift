@@ -103,6 +103,9 @@ public final class KQueue: Sendable {
     private let eventHandler: (@Sendable (Event) -> Void)?
     private let eventsContinuation: AsyncStream<Event>.Continuation
 
+    /// Timeout for the kevent() call.
+    public let timeout: Duration
+
     /// Events from watched paths.
     public let events: AsyncStream<Event>
 
@@ -114,11 +117,15 @@ public final class KQueue: Sendable {
     // MARK: - Init
 
     /// Returns nil if kqueue creation fails.
-    public init?(eventHandler: (@Sendable (Event) -> Void)? = nil) {
+    /// - Parameters:
+    ///   - timeout: Timeout for kevent() call. Default is 1 second.
+    ///   - eventHandler: Optional callback for each event.
+    public init?(timeout: Duration = .seconds(1), eventHandler: (@Sendable (Event) -> Void)? = nil) {
         let fd = kqueue()
         guard fd >= 0 else { return nil }
 
         self.kqueueFD = fd
+        self.timeout = timeout
         self.eventHandler = eventHandler
 
         var continuation: AsyncStream<Event>.Continuation!
@@ -254,11 +261,12 @@ public final class KQueue: Sendable {
 
     private func monitorLoop() async {
         var event = kevent()
-        var timeout = timespec(tv_sec: 1, tv_nsec: 0)
+        let (seconds, attoseconds) = timeout.components
+        var timeoutSpec = timespec(tv_sec: Int(seconds), tv_nsec: Int(attoseconds / 1_000_000_000))
 
         while !Task.isCancelled && state.withLock({ !$0.fdToPath.isEmpty }) {
 
-            let eventCount = kevent(kqueueFD, nil, 0, &event, 1, &timeout)
+            let eventCount = kevent(kqueueFD, nil, 0, &event, 1, &timeoutSpec)
 
             if eventCount < 0 {
                 if errno == EINTR { continue }
